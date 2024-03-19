@@ -164,7 +164,7 @@ class SuffixArray(val S : String) {
     }
     var RLCP = Array(0) { IntArray(0) }
     var LOG2 = IntArray(0)
-    fun BuildRangeQueries(){
+    fun buildRangeQueries(){
         var L = 0
         while((1 shl L) <= N) L++;
         val RLCP = Array(L) { IntArray(N) }
