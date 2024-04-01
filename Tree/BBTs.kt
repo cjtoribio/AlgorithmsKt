@@ -9,9 +9,12 @@ import java.util.Stack
 import java.util.TreeMap
 import java.util.TreeSet
 import java.util.concurrent.atomic.AtomicReference
+import java.util.stream.Stream
 import kotlin.math.abs
 import kotlin.math.max
+import kotlin.math.sign
 import kotlin.random.Random
+import kotlin.reflect.full.primaryConstructor
 import kotlin.time.measureTime
 import kotlin.time.toKotlinDuration
 
@@ -160,43 +163,63 @@ inline fun rep(N: Int, block: () -> Unit) {
 }
 
 abstract class BinaryBalanceTree<T : Comparable<T>> : AbstractMutableSet<T>() {
-    abstract class Node<T, N : Node<T, N>>(val x : T) {
-        var left: N? = null
-        var right: N? = null
+    var drillingDown = 0
+    var rotations = 0
+    open class Node<T, N : Node<T, N>>(val x : T, val child: Array<N?>) {
+        val left get() = child[0]
+        val right get() = child[1]
         var parent: N? = null
         var sz: Int = 1
         fun isLeft(): Boolean {
-            return parent?.left == this
+            return parent?.child?.get(0) == this
         }
+        fun side(): Int {
+            return if (parent?.child?.get(0) == this) 0 else 1
+        }
+        fun get(side: Int) = child[side]
         open fun update(): N {
-            sz = 1 + (left?.sz ?: 0) + (right?.sz ?: 0)
+            sz = 1 + ((child[0])?.sz ?: 0) + ((child[1])?.sz ?: 0)
             return this as N
+        }
+        fun attach(side: Int, ch: N?) {
+            child[side] = ch
+            ch?.parent = this as N
         }
     }
 
     protected fun <N : Node<T, N>> moveUp(n: N) {
+        rotations++
         val p = n.parent!!
-        val gp= p.parent
-        if (p.left == n) {
-            p.left = n.right; n.right = p; p.left?.parent = p
-            n.parent = gp; p.parent = n
-        } else {
-            p.right = n.left; n.left = p; p.right?.parent = p
-            n.parent = gp; p.parent = n
-        }
-        if (gp != null) {
-            if (gp.left == p) gp.left = n
-            else gp.right = n
-        }
+        val side = n.side()
+        p.parent?.child?.set(p.side(), n)
+        n.parent = p.parent
+        p.child[side] = n.child[1 - side]
+        n.child[1-side]?.parent = p
+        n.child[1-side] = p
+        p.parent = n
         p.update()
         n.update()
+    }
+
+    fun <N : Node<T, N>>contains(root: N?, element: T): Boolean {
+        var n = root
+        while (n != null) {
+            drillingDown++
+            n = when (element.compareTo(n.x).sign) {
+                -1 -> n.left
+                0 -> return true
+                1 -> n.right
+                else -> return false
+            }
+        }
+        return false
     }
 
     fun <N : Node<T, N>> iterator(root : N?): MutableIterator<T> {
         val stack = Stack<Node<T, N>>()
         fun goAllLeft() {
-            while (stack.isNotEmpty() && stack.peek().left != null)
-                stack.add(stack.peek().left)
+            while (stack.isNotEmpty() && stack.peek().child[0] != null)
+                stack.add(stack.peek().child[0])
         }
         if (root != null) stack.add(root)
         goAllLeft()
@@ -205,8 +228,8 @@ abstract class BinaryBalanceTree<T : Comparable<T>> : AbstractMutableSet<T>() {
 
             override fun next(): T {
                 val t = stack.pop()
-                if (t.right != null) {
-                    stack.add(t.right)
+                if (t.child[1] != null) {
+                    stack.add(t.child[1] as N)
                     goAllLeft()
                 }
                 return t.x
@@ -220,22 +243,64 @@ abstract class BinaryBalanceTree<T : Comparable<T>> : AbstractMutableSet<T>() {
     }
 }
 
-class TreapSet<T : Comparable<T>> : AbstractMutableSet<T>() {
-    inner class Node(val x: T) {
+
+typealias TreapSet<T> = TreapSegmentTree<T, Any>
+class TreapSegmentTree<T: Comparable<T>, U>(val comparator: Comparator<T> = Comparator.naturalOrder()) : AbstractMutableSet<T>() {
+    inner class Node(var x: T, var u: U? = null) {
         var left: Node? = null
         var right: Node? = null
+        var flipPending: Boolean = false
         var sz: Int = 1
         val y = Random.nextInt()
+        var ax = x
+        fun flip() {
+            flipPending = true
+            left = right.also { right = left }
+        }
+        fun apply(u: U) {
+            this.u += u!!
+            ax = update!!(sz, x, u)
+            x = update!!(1, x, u)
+        }
+        fun push() {
+            if (flipPending) {
+                flipPending = false
+                left?.flip()
+                right?.flip()
+            }
+            if (update != null && u != null) {
+                left?.apply(u!!)
+                right?.apply(u!!)
+                u = null
+            }
+        }
         fun update(): Node {
             sz = 1 + (left?.sz ?: 0) + (right?.sz ?: 0)
+            if (combiner != null) ax = left?.ax + x + right?.ax
             return this
         }
     }
 
+    private operator fun T?.plus(other: T?): T {
+        if (this == null) return other!!
+        if (other == null) return this
+        return combiner!!(this, other)
+    }
+
+    private operator fun U?.plus(other: U?): U {
+        if (this == null) return other!!
+        if (other == null) return this
+        return updateCombiner!!(this, other)
+    }
+
     var root: Node? = null
+    var update: ((Int, T, U) -> T)? = null
+    var combiner: ((T, T) -> T)? = null
+    var updateCombiner: ((U, U) -> U)? = null
 
     override val size: Int get() = root?.sz ?: 0
     private fun split(t: Node?, goLeft: (Node) -> Boolean) : Pair<Node?, Node?> {
+        t?.push()
         val ret = if (t == null) {
             Pair(null, null)
         } else if (goLeft(t)) {
@@ -245,29 +310,97 @@ class TreapSet<T : Comparable<T>> : AbstractMutableSet<T>() {
         }
         return ret
     }
-    private fun insert(t: Node?, it: Node): Node {
-        val ret = if (t == null) it
+
+    private fun join(l: Node?, r: Node?) : Node? {
+        if (l == null) return r
+        if (r == null) return l
+        return if (l.y >= r.y) {
+            l.push()
+            l.right = join(l.right, r)
+            l.update()
+        }
+        else {
+            r.push()
+            r.left = join(l, r.left)
+            r.update()
+        }
+    }
+
+    private fun insert(t: Node?, it: Node, goLeft: (Node) -> Boolean): Node {
+        return if (t == null) it
         else if(it.y > t.y){
-            val (l, r) = split(t) { n -> it.x < n.x }
+            val (l, r) = split(t, goLeft)
             it.left = l; it.right = r; it
         }else{
-            if (it.x < t.x) { t.left = insert(t.left, it); t }
-            else { t.right = insert(t.right, it); t }
+            t.push()
+            if (it.x < t.x) { t.left = insert(t.left, it, goLeft); t }
+            else { t.right = insert(t.right, it, goLeft); t }
+        }.update()
+    }
+
+    private fun split(node: Node?, leftCount: Int): Pair<Node?, Node?> {
+        var idxI = leftCount
+        val (l, r) = split(node) { n -> if (idxI <= (n.left?.sz ?: 0)) true else { idxI -= (n.left?.sz ?: 0)+1; false } }
+        return Pair(l, r)
+    }
+
+    fun update(i: Int, j: Int, u: U) {
+        val (l1, r) = split(root, j+1)
+        val (l, m) = split(l1, i)
+        m?.apply(u)
+        root = join(l, join(m, r))
+    }
+
+    fun query(i: Int, j: Int): T {
+        val (l1, r) = split(root, j+1)
+        val (l, m) = split(l1, i)
+        val ret = m!!.ax
+        if (ret == 13) {
+            val t = 1
         }
-        ret.update()
+        root = join(l, join(m, r))
         return ret
     }
 
-    override fun add(element: T): Boolean {
-        root = insert(root, Node(element)).update()
+    fun flip(i: Int, j: Int) {
+        val (l1, r) = split(root, j+1)
+        val (l, m) = split(l1, i)
+        m?.flip()
+        root = join(l, join(m,r))
+    }
+
+    fun insert(i: Int, element: T) : Boolean {
+        val (l, r) = split(root, i)
+        root = join(join(l, Node(element)), r)
         return true
+    }
+
+    override fun add(element: T): Boolean {
+        root = insert(root, Node(element)) { n -> comparator.compare(element, n.x) < 0 }
+        return true
+    }
+
+    override fun contains(element: T): Boolean {
+        var n = root
+        while (n != null) {
+            n.push()
+            n = when (comparator.compare(element, n.x).sign) {
+                -1 -> n.left
+                0 -> return true
+                1 -> n.right
+                else -> return false
+            }
+        }
+        return false
     }
 
     override fun iterator(): MutableIterator<T> {
         val stack = Stack<Node>()
         fun goAllLeft() {
-            while (stack.isNotEmpty() && stack.peek().left != null)
+            while (stack.isNotEmpty() && stack.peek().left != null) {
+                stack.peek().push()
                 stack.add(stack.peek().left)
+            }
         }
         if (root != null) stack.add(root)
         goAllLeft()
@@ -292,7 +425,7 @@ class TreapSet<T : Comparable<T>> : AbstractMutableSet<T>() {
 }
 
 class AVLTree<T : Comparable<T>> : BinaryBalanceTree<T>() {
-    inner class Node(x: T) : BinaryBalanceTree.Node<T, Node>(x) {
+    inner class Node(x: T) : BinaryBalanceTree.Node<T, Node>(x, Array(2) { null }) {
         var depth = 0
         fun balanceFactor() : Int {
             return (left?.depth?:-1) - (right?.depth?:-1)
@@ -313,16 +446,17 @@ class AVLTree<T : Comparable<T>> : BinaryBalanceTree<T>() {
         return true
     }
 
+    override fun contains(element: T): Boolean {
+        return contains(root, element)
+    }
+
     private fun insert(nn: Node) : Node {
         var n = root
         while (n != null) {
-            if (nn.x < n.x) {
-                if (n.left == null) { n.left = nn; nn.parent = n; n.update(); break }
-                else n = n.left
-            } else {
-                if (n.right == null) { n.right = nn; nn.parent = n; n.update(); break }
-                else n = n.right
-            }
+            drillingDown++
+            val side = if (nn.x < n.x) 0 else 1
+            if (n.child[side] == null) { n.attach(side, nn); n.update(); break }
+            else n = n.get(side)
         }
         if (n == null) n = nn
         while (true) {
@@ -353,10 +487,80 @@ class AVLTree<T : Comparable<T>> : BinaryBalanceTree<T>() {
             }
         } else n.update()
     }
+
+    fun treePrint(n: Node? = root, indent: Int = 0) {
+        if (n == null) return
+        treePrint(n.left, indent+1)
+        println("   ".repeat(indent) + "${n.x}")
+        treePrint(n.right, indent+1)
+    }
+}
+
+class RBTree<T :  Comparable<T>> : BinaryBalanceTree<T>() {
+    inner class Node(x: T) : BinaryBalanceTree.Node<T, Node>(x, Array(2) { null }) {
+        var red = true
+    }
+
+    private fun fixAfterInsert(n: Node) {
+        var n = n
+        n.red = true
+        while (n.parent?.red == true) {
+            val p = n.parent!!
+            val y = p.parent!!.child[1 - p.side()]
+            if (y?.red == true) {
+                p.red = false
+                y.red = false
+                p.parent!!.red = true
+                n = p.parent!!
+            } else {
+                if (n.side() != p.side()) {
+                    moveUp(n)
+                    n.red = false
+                    n.parent?.red = true
+                    moveUp(n)
+                    n = p
+                } else {
+                    p.red = false
+                    p.parent?.red = true
+                    moveUp(p)
+                }
+            }
+        }
+        while (n.parent != null) {
+            n = n.parent!!
+            n.update()
+        }
+        root = n
+        root?.red = false
+    }
+
+    var root: Node? = null
+    override fun iterator(): MutableIterator<T> {
+        return super.iterator(root)
+    }
+
+    override fun contains(element: T) : Boolean {
+        return contains(root, element)
+    }
+    override val size get() = root?.sz ?: 0
+    override fun add(element: T): Boolean {
+        val nn = Node(element)
+        var n = root
+        while (n != null) {
+            drillingDown++
+            val side = if (nn.x < n.x) 0 else 1
+            if (n.child[side] == null) { n.attach(side, nn); n.update(); break }
+            else n = n.get(side)
+        }
+        fixAfterInsert(nn)
+        return true
+    }
+
+
 }
 
 class SplayTree<T : Comparable<T>> : BinaryBalanceTree<T>() {
-    inner class Node(x: T) : BinaryBalanceTree.Node<T, Node>(x)
+    inner class Node(x: T) : BinaryBalanceTree.Node<T, Node>(x, Array(2) { null })
 
     var root: Node? = null
     override val size get() = root?.sz ?: 0
@@ -390,7 +594,7 @@ class SplayTree<T : Comparable<T>> : BinaryBalanceTree<T>() {
     private fun splay(n: Node) {
         while (n.parent != null) {
             if (n.parent!!.parent == null) moveUp(n)
-            else if (n.isLeft() == n.parent!!.isLeft()) {
+            else if (n.side() == n.parent?.side()) {
                 moveUp(n.parent!!)
                 moveUp(n)
             } else {
@@ -398,6 +602,7 @@ class SplayTree<T : Comparable<T>> : BinaryBalanceTree<T>() {
                 moveUp(n)
             }
         }
+        root = n
     }
 
     override fun add(v: T) : Boolean {
@@ -405,36 +610,110 @@ class SplayTree<T : Comparable<T>> : BinaryBalanceTree<T>() {
         return true
     }
 
+    override fun contains(element: T) : Boolean {
+        var n = root
+        while (n != null && n.x != element) {
+            drillingDown++
+            if (element < n.x) {
+                if (n.left == null) break
+                else n = n.left
+            } else {
+                if (n.right == null) break
+                else n = n.right
+            }
+        }
+        if (n != null) splay(n)
+        return n?.x == element
+    }
+
     private fun insert(nn: Node) {
         var n = root
         while (n != null) {
+            drillingDown++
             if (nn.x < n.x) {
-                if (n.left == null) { n.left = nn; nn.parent = n; break }
+                if (n.left == null) { n.attach(0, nn); break }
                 else n = n.left
             } else {
-                if (n.right == null) { n.right = nn; nn.parent = n; break }
+                if (n.right == null) { n.attach(1, nn); break }
                 else n = n.right
             }
         }
         splay(nn)
-        root = nn
     }
 
 }
 
+fun benchmark() {
+
+    val setTypes: Map<String, () -> AbstractSet<Int>> = mapOf(
+        Pair("RBTree") { RBTree() },
+        Pair("AvlTree") { AVLTree() },
+        Pair("TreapSet") { TreapSet() },
+        Pair("TreeSet") { TreeSet() },
+        Pair("SplayTree") { SplayTree() }
+    )
+
+    val times = 400_000
+    for (i in 1..2  ) {
+        for ((name, builder) in setTypes) {
+            val a = builder()
+            val insertDuration = measureTime {
+                for (i in 0 until times) {
+                    a.add(randInt())
+//            a.treePrint()
+//            println("-".repeat(20))
+                }
+//                println("rotations=${a.rotations}")
+//                println("drillingDown=${a.drillingDown}")
+            }
+            val accessDuration = measureTime {
+//                a.rotations = 0
+//                a.drillingDown = 0
+                for (i in 0 until times) {
+                    a.contains(randInt())
+//            a.treePrint()
+//            println("-".repeat(20))
+                }
+//                println("rotations=${a.rotations}")
+//                println("drillingDown=${a.drillingDown}")
+
+//        println(a.take(100).joinToString("\n"))
+//        println(a.ops)
+            }
+            println("${name} ${insertDuration} ${accessDuration} ${a.size}")
+        }
+        println("-".repeat(20))
+    }
+}
+
+
 fun main() {
 
 //    Reader.takeFile("./in.txt")
-    val duration = measureTime {
-        val a = AVLTree<Int>()
 
-        for (i in 0 until 400_000) {
-            a.add(randInt())
-        }
-//        println(a.take(100).joinToString("\n"))
-//        println(a.ops)
-    }
-    println(duration)
+//    benchmark()
+    val tr = TreapSegmentTree<Int, Int>()
+
+    tr.combiner = { a,b -> a + b }
+    tr.update = {sz, v, u -> v + sz * u}
+    tr.updateCombiner = { a, b -> a + b }
+
+
+    tr.insert(0, 10)
+    tr.insert(0, 9)
+    tr.insert(0, 8)
+    tr.insert(0, 7)
+    tr.insert(2, 6)
+    tr.insert(4, 5)
+
+    println(tr.query(0, 2))
+    println(tr)
+
+    tr.flip(1,5)
+//    tr.update(0, 2, 1)
+
+    println(tr.query(0, 2))
+    println(tr)
 
 
 }
